@@ -1,5 +1,5 @@
 #jinja2: newline_sequence:'\r\n'
-version: '3.3'
+version: '3.4'
 
 services:
 
@@ -8,21 +8,76 @@ services:
     image: {{registry_host}}/{{ service.name }}
 {% if service.map_to_same_port_on_host is defined %}
     ports:
-         - "{{ service.port }}:{{ service.port }}"
+      - target: {{ service.port }}
+        published: {{ service.port }}
+        protocol: tcp
+        mode: host
 {% else %}
     ports:
-         - "{{ service.port }}"
+      - target: {{ service.port }}
+        protocol: tcp
+        mode: host
 {% endif %}
     tty:
       true
     restart:
       unless-stopped
     deploy:
+      endpoint_mode: dnsrr
       placement:
 {% if service.deploy_target == 'windows' %}
         constraints: [node.labels.os==windows]
 {% else %}
         constraints: [node.labels.os==linux]
 {% endif %}
+      labels:
+        - "traefik.port={{ service.port }}"
+        - "traefik.backend.loadbalancer.method=drr"
+       # - "traefik.backend.loadbalancer.swarm=false"
+       # - "traefik.docker.network={{ application_stack_name }}_{{ swarm_network_name }}"
+        - "traefik.backend={{ service.name }}"
+# Use Traefik healthcheck        "traefik.backend.healthcheck.path": "/healthcheck",
+        - "traefik.frontend.rule=Host:{{ service.name }}.{{ docker_domain }}"
+    networks:
+     - {{swarm_network_name }}
 
 {% endfor %}
+
+  traefik:
+    image: traefik
+    ports:
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: host
+      - target: 8080
+        published: 8080
+        protocol: tcp
+        mode: host
+    tty:
+      true
+    restart:
+      unless-stopped
+    deploy:
+      endpoint_mode: dnsrr
+      replicas: 1
+      placement:
+        constraints: [node.labels.os==linux]
+        constraints: [node.role == manager]
+    command:
+      - --docker
+      - --docker.swarmmode
+      - --docker.domain={{ docker_domain }}
+      - --docker.watch
+      - --web
+      - --logLevel=DEBUG
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+
+    networks:
+     - {{swarm_network_name }}
+
+networks:
+  {{ swarm_network_name }}:

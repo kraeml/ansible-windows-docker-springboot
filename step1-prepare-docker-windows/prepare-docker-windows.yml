@@ -3,27 +3,34 @@
 
   tasks:
   - name: Check the minimum Windows build number
-    include: check-build-number.yml
+    include_tasks: check-build-number.yml
+    tags: baseimage
+
+  # task is not fully ready, we also want to switch to win_updates with Ansible 2.5, where this module should work finally
+  - name: Install latest Windows Updates
+    include_tasks: install-windows-updates.yml
+    tags: winupdate
 
   - name: Install Windows Containers and Hyper-V Windows Features (if not already present)
-    include: install-windows-container-features.yml
+    include_tasks: install-windows-container-features.yml
 
   - name: Install Docker on Windows (always the newest version) and pull needed base images
-    include: install-docker.yml
+    include_tasks: install-docker.yml
 
   - name: Install Docker Compose (also always the newest version)
-    include: install-docker-compose.yml
+    include_tasks: install-docker-compose.yml
 
   - name: Run a Microsoft Docker Windows Testcontainer
-    include: run-test-container.yml
+    include_tasks: run-test-container.yml
 
   - name: Build the springboot-oraclejre-nanoserver Docker image
-    include: build-springboot-oraclejre-nanoserver-image.yml
+    include_tasks: build-springboot-oraclejre-nanoserver-image.yml
     vars:
       image_name: springboot-oraclejre-nanoserver
-      java8_update_version: 144
-      java_build_version: b01
+      java8_update_version: 152
+      java_build_version: b16
       server_jre_name: server-jre-8u{{java8_update_version}}-windows-x64.tar.gz
+    tags: baseimage
 
   - name: Your Windows Box is now fully ready to run Spring Boot Apps inside Windows Docker Containers
     debug:

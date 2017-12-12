@@ -324,6 +324,8 @@ Newest Insider builds: https://insider.windows.com/ or here https://www.microsof
 
 ##### Good resources
 
+https://docs.ansible.com/ansible/devel/plugins/connection.html
+
 https://blog.docker.com/2016/09/build-your-first-docker-windows-server-container/
 
 [Walktrough Windows Docker Containers](https://github.com/artisticcheese/artisticcheesecontainer/wiki)
@@ -347,6 +349,11 @@ If Service discovery doen´t work reliable: http://stackoverflow.com/questions/4
 # Docker Container Orchestration with Linux & Windows mixed OS setup
 
 Example steps showing how to provision and run Spring Boot Apps with Docker Swarm &amp; Docker in mixed mode on Linux AND Windows (Docker Windows Containers!)
+
+This is a follow-up to the blog post [Scaling Spring Boot Apps on Docker Windows Containers with Ansible: A Complete Guide incl Spring Cloud Netflix and Docker Compose](https://blog.codecentric.de/en/2017/05/ansible-docker-windows-containers-scaling-spring-cloud-netflix-docker-compose/)). There are some corresponding follow up blog posts available:
+
+* [Taming the Hybrid Swarm: Initializing a Mixed OS Docker Swarm Cluster Running Windows & Linux Native Containers with Vagrant & Ansible](https://blog.codecentric.de/en/2017/09/taming-hybrid-swarm-init-mixed-os-docker-swarm-vagrant-ansible/)
+
 
 ## Why more?
 
@@ -380,13 +387,64 @@ Add new Windows 2016 Vagrant box:
 vagrant box add --name windows_2016_multimachine windows_2016_docker_multimachine_virtualbox.box
 ```
 
-Now switch over to `step4-windows-linux-multimachine-vagrant` directory and do a:
+Now switch over to `step4-windows-linux-multimachine-vagrant` directory. Here´s the Vagrantfile defining our local Cloud infrastructure. It defines 4 machines to show the many possible solutions in a hybrid Docker Swarm containing Windows and Linux boxes: Manager nodes both as Windows and Linux machines and Worker nodes, also both as Windows and Linux machines:
+
+* masterlinux01
+* workerlinux01
+* masterwindows01
+* workerwindows01
+
+
+PICTURE!
+
+Within a Vagrant multimachine setup, you define your separate machines with the `config.vm.define` keyword. Inside those define blocks we simply configure our individual machine. Let´s have a look onto the `workerlinux`:
 
 ```
-vagrant up
+    # One Worker Node with Linux
+    config.vm.define "workerlinux" do |workerlinux|
+        workerlinux.vm.box = "ubuntu/trusty64"
+        workerlinux.vm.hostname = "workerlinux01"
+        workerlinux.ssh.insert_key = false
+        # Forwarding the port for Ansible explicitely to not run into Vagrants 'Port Collisions and Correction'
+        # see https://www.vagrantup.com/docs/networking/forwarded_ports.html, which would lead to problems with Ansible later
+        workerlinux.vm.network "forwarded_port", guest: 22, host: 2232, host_ip: "127.0.0.1", id: "ssh"
+
+        # As to https://www.vagrantup.com/docs/multi-machine/ & https://www.vagrantup.com/docs/networking/private_network.html
+        # we need to configure a private network, so that our machines are able to talk to one another
+        workerlinux.vm.network "private_network", ip: "172.16.2.11"
+
+        workerlinux.vm.provider :virtualbox do |virtualbox|
+            virtualbox.name = "WorkerLinuxUbuntu"
+            virtualbox.gui = true
+            virtualbox.memory = 2048
+            virtualbox.cpus = 2
+            virtualbox.customize ["modifyvm", :id, "--ioapic", "on"]
+            virtualbox.customize ["modifyvm", :id, "--vram", "16"]
+        end
+    end
+...
 ```
 
-Now we´re ready to play. And nevermind, if you want to have a break or your notebook is running hot - just type a `vagrant halt`. And the whole zoo of machines will be stopped for you :)
+The first configuration statements are usual ones like configuring the Vagrant box to use or the VM´s hostname. But the fowarded port configuration is made explicit, because we need to rely on the exact port later in our Ansible scripts. And this wouldn´t be possible with Vagrants default [Port Correction feature](https://www.vagrantup.com/docs/networking/forwarded_ports.html). Because you couldn´t use a port on your host machine more then once, Vagrant would automatically set it to a random value - and we weren´t able to access our boxes later with Ansible.
+
+To define and override the SSH port of a preconfigured Vagrant box, we need to know the `id` which is used to define it in the base box. On Linux boxes this is `ssh` - and on Windows this is `winrm-ssl`.
+
+
+###### Host-only Network configuration
+
+The next tricky part is the network configuration between the Vagrant boxes. As they need to talk to each other and also to the Host, the so called [Host-only networking](http://www.virtualbox.org/manual/ch06.html#network_hostonly) should be the way to go here (there´s a really good [overview in this post](https://www.thomas-krenn.com/de/wiki/Netzwerkkonfiguration_in_VirtualBox#Host-only_networking), sorry german only). This is easily established using [Vagrants Private Networks configuration](https://www.vagrantup.com/docs/networking/private_network.html).
+
+And as we want to access our boxes with a static IP, we leverage the Vagrant configuration around [Vagrant private networking](https://www.vagrantup.com/docs/networking/private_network.html). All that´s needed here, is to have such a line inside every Vagrant box definition of our multi-machine setup:
+
+```
+masterlinux.vm.network "private_network", ip: "172.16.2.10"
+```
+
+Same for Windows boxes, Vagrant will tell VirtualBox to create a new separate network (mostly `vboxnet1` or similar), put a second virtual network device into every box and assign with the static IP, we configured in our Vagrantfile. That´s pretty much everything, except for Windows Server :) 
+
+
+
+
 
 
 
@@ -412,6 +470,16 @@ See https://github.com/ansible/ansible/issues/9065
 
 ###### Different hostnames 
 
+
+tbd
+
+But what if we were able to change the /etc/hosts on our Host machine with every `vagrant up`? (https://stackoverflow.com/questions/16624905/adding-etc-hosts-entry-to-host-machine-on-vagrant-up) That´s possible with the https://github.com/cogitatio/vagrant-hostsupdater, install it with:
+
+```
+vagrant plugin install vagrant-hostmanager
+```
+
+
 Current workaround: configure ~/hosts
 
 ```
@@ -421,18 +489,22 @@ Current workaround: configure ~/hosts
 127.0.0.1 workerwindows01
 ```
 
-###### Host-only Network configuration
-
-As our Vagrant boxes need to talk to each other and also to the Host, the so called [Host-only networking](http://www.virtualbox.org/manual/ch06.html#network_hostonly) should be the way to go here (there´s a really good [overview in this post](https://www.thomas-krenn.com/de/wiki/Netzwerkkonfiguration_in_VirtualBox#Host-only_networking), sorry german only). And as we want to access our boxes with a static IP, we leverage the Vagrant configuration around [Vagrant private networking](https://www.vagrantup.com/docs/networking/private_network.html). All that´s needed here, is to have such a line inside every Vagrant box definition of our multi-machine setup:
+do a:
 
 ```
-masterlinux.vm.network "private_network", ip: "172.16.2.10"
+vagrant up
 ```
 
-Same for Windows boxes, Vagrant will tell VirtualBox to create a new separate network (mostly `vboxnet1` or similar), put a second virtual network device into every box and assign with the static IP, we configured in our Vagrantfile. That´s pretty much everything, except for Windows Server :) 
+Now we´re ready to play. And nevermind, if you want to have a break or your notebook is running hot - just type a `vagrant halt`. And the whole zoo of machines will be stopped for you :)
 
 
-###### Windows Server firewall blocks Ping c later needed routing mesh network traffic
+
+
+
+
+
+
+###### Windows Server firewall blocks Ping & later needed Container network traffic
 
 As you may noticed, there´s an extra for Windows Server 2016. Because we want our machines to be accessible from each other, we have to allow the very basic command everybody start´s with: the ping. That one [is blocked by the Windows firewall as a default](https://www.rootusers.com/how-to-enable-ping-in-windows-server-2016-firewall/) and we have to open that up with the following [Powershell command](https://technet.microsoft.com/de-de/library/dd734783(v=ws.10).aspx#BKMK_3_add) - obviously wrapped inside a Ansible task:
 
@@ -444,13 +516,7 @@ As you may noticed, there´s an extra for Windows Server 2016. Because we want o
 
 Additionally, and this part is mentioned pretty much at the end of the docker docs if you want to fire up a Swarm, the later established routing network needs access to several ports, [as the docs state](https://docs.docker.com/engine/swarm/ingress/). __AND__ "you need to have the following ports open between the swarm nodes before you enable swarm mode". So we need to do that __before__ even initializing our Swarm!
 
-tbd
 
-But what if we were able to change the /etc/hosts on our Host machine with every `vagrant up`? (https://stackoverflow.com/questions/16624905/adding-etc-hosts-entry-to-host-machine-on-vagrant-up) That´s possible with the https://github.com/cogitatio/vagrant-hostsupdater, install it with:
-
-```
-vagrant plugin install vagrant-hostsupdater
-```
 
 ###### Prepare Docker engines on all Nodes
 
@@ -607,6 +673,8 @@ skipping: [workerlinux01]
 This means that our Docker Swarm cluster is ready for service deployment!
 
 
+
+
 ## Step 5 - Deploy multiple Spring Boot Apps on mixed-OS Docker Windows- & Linux Swarm with Ansible ([step5-deploy-multiple-spring-boot-apps-to-mixed-os-docker-swarm](https://github.com/jonashackt/ansible-windows-docker-springboot/tree/master/step5-deploy-multiple-spring-boot-apps-to-mixed-os-docker-swarm))
 
 As Microsoft states in the [Swarm docs](https://docs.microsoft.com/en-us/virtualization/windowscontainers/manage-containers/swarm-mode), Docker Swarm Services can be easily deployed to the Swarm with the `docker service create` command and afterwards scaled with `docker service scale`. There´s a huge amount on configuration parameters you can use [with docker service create](https://docs.docker.com/engine/swarm/services/).
@@ -614,8 +682,6 @@ As Microsoft states in the [Swarm docs](https://docs.microsoft.com/en-us/virtual
 __BUT:__ That approach reminds us of those first days with Docker not using Docker Compose. So it would be really nice to have something like Compose also for our Swarm deployment. And it´s really that simple - [just use Compose with Docker Stack Deploy for that :)](https://docs.docker.com/engine/swarm/stack-deploy/):
 
 > "Docker Compose and Docker Swarm aim to have full integration, meaning you can point a Compose app at a Swarm cluster and have it all just work as if you were using a single Docker host."
-
-So let´s directly break a architectural rule we build up in the preceding work: Don´t extensively template the docker-compose.yml any more, because this would lead to a rather complex setup process in Ansible. And remember: we´ve only did this, because we wanted to be free in our choice of Container orchestration technology - but now we choose Docker Swarm, we can savely forget this approach.
 
 Back to the concrete docker-compose.yml file. Let´s use the [newest 3.3 version](https://docs.docker.com/compose/compose-file/compose-versioning/#version-33) here, so that we can leverage the most out of Swarm´s functionality, which is broadened with each Compose (file) version.
 
@@ -631,11 +697,20 @@ ansible-playbook -i hostsfile build-and-deploy-apps-2-swarm.yml
 From https://docs.docker.com/get-started/part5/#introduction:
 > "A stack is a group of interrelated services that share dependencies, and can be orchestrated and scaled together. A single stack is capable of defining and coordinating the functionality of an entire application."
 
-Think of a Stack as like what Compose is for Docker - grouping multiple Docker Swarm services together with the help of a docker-stack.yml (which looks like a docker-compose.yml file and uses nearly the same syntax (Stack has 'deploy' over Compose)).
+Think of a Stack as like what Compose is for Docker - grouping multiple Docker Swarm services together with the help of a docker-stack.yml (which looks like a docker-compose.yml file and uses nearly the same syntax (Stack has 'deploy' over Compose)). An example `docker-stack.yml` looks like:
+
+```
+tbadded
+```
+
+Don´t try to search for "Docker Stack command reference", just head over to the Docker Compose docs and you should find, what you need: https://docs.docker.com/compose/compose-file/#deploy Because Docker Swarm makes use of Docker Compose files, the Swarm capabilities of Stack are only just a section (`deploy`) in the Compose docs.
+
 
 We should see our applications in Portainer now:
 
 ![portainer-swarm-visualizer](https://github.com/jonashackt/ansible-windows-docker-springboot/blob/master/portainer-swarm-visualizer.png)
+
+
 
 #### Accessing Spring Boot applications deployed in the Swarm
 
@@ -677,7 +752,7 @@ This should give you more insights into this app, including the mapped Port 3000
 
 With all this information, you could check out your first Docker Swarm deployed App. Just log into `workerlinux01` and call your App, e.g. with a `curl http://localhost:30001/swagger-ui.html` - as the [weatherbackend](https://github.com/jonashackt/cxf-spring-cloud-netflix-docker) is usind [Springfox](https://github.com/springfox/springfox) together with Swagger to show all of it´s REST endpoints:
 
-![curl-linux-container](https://github.com/jonashackt/ansible-windows-docker-springboot/blob/master/docker-service-inspect-app.png)
+![curl-linux-container](https://github.com/jonashackt/ansible-windows-docker-springboot/blob/master/curl-linux-container.png)
 
 As Windows doesn´t support localhost loopback, we have to add one more step, to access an App which is deployed into a Windows native Docker Container: We need to know the Container´s IP:
 
@@ -693,15 +768,226 @@ https://docs.docker.com/engine/swarm/ingress/
 Note: this is only possible with Windows Server 2016, if you opened the needed ports before initializing the Swarm (this is already done in [step4-windows-linux-multimachine-vagrant-docker-swarm-setup](https://github.com/jonashackt/ansible-windows-docker-springboot/tree/master/step4-windows-linux-multimachine-vagrant-docker-swarm-setup) for you ;) ).
 
 
+#### Routing mesh problems on Windows
+
+Docker network routing mesh support in Windows Server 2016 1709: https://blog.docker.com/2017/09/docker-windows-server-1709/ & https://blogs.technet.microsoft.com/virtualization/2017/09/26/dockers-ingress-routing-mesh-available-with-windows-server-version-1709/
+
+__BUT:__ See my comment there:
+
+> Hi Kallie, to use the new features in production at the customer, we need to have access to the new 1709 build of Windows Server 2016. As this post here https://blogs.technet.microsoft.com/windowsserver/2017/10/17/windows-server-version-1709-available-for-download/ states, the 1709 build will only be available in the so called “Semi-annual channel”, which is only available for customers if they have the “Software Assurance” package (as this post states https://cloudblogs.microsoft.com/hybridcloud/2017/06/15/delivering-continuous-innovation-with-windows-server/).
+
+> To provide a recommendation for the customer, that is based on a proven and fully automated “infrastructure as code” example, I successfully build a GitHub repo (https://github.com/jonashackt/ansible-windows-docker-springboot) with EVERY needed step, beginning with the download of a evaluation copy of Windows Server 2016 from here https://www.microsoft.com/de-de/evalcenter/evaluate-windows-server-2016, going over to a setup with VirtualBox/Vagrant (https://www.vagrantup.com/), Provisioning with Ansible and (https://www.ansible.com/) and finally running and scaling Spring Boot apps Dockerized on the Windows Server.
+
+> Now the next step is Docker orchestration with Swarm (and later Kubernetes). But with the current version of https://www.microsoft.com/de-de/evalcenter/evaluate-windows-server-2016, the mentioned Docker network routing mesh support isn´t available for us. Is there any chance to update this version in the evalcenter? I know there´s the Insiderprogram, but I doesn´t really help my to have a fully trustable setup where I can prove for everybody, that everything will work.
+
+__TLDR:__
+
+--> only available in Windows Server 2016 1709: https://blogs.technet.microsoft.com/windowsserver/2017/10/17/windows-server-version-1709-available-for-download/
+
+--> only available in the "Semi-annual channel", which is according to https://cloudblogs.microsoft.com/hybridcloud/2017/06/15/delivering-continuous-innovation-with-windows-server/ only available with the "Software Assurance" package you have to buy separately to the Server licence 
+
+--> only alternative: Windows Insider program: https://www.microsoft.com/en-us/software-download/windowsinsiderpreviewserver
+
+--> but this isn´t a good start with customers!
+
+#### Test Packer build
+
+```
+packer build -var iso_url=en_windows_server_version_1709_x64_dvd_100090904.iso -var iso_checksum=7c73ce30c3975652262f794fc35127b5 -var template_url=vagrantfile-windows_1709-multimachine.template -var box_output_prefix=windows_1709_docker_multimachine windows_server_2016_docker.json
+```
+
+```
+vagrant box add --name windows_1709_docker_multimachine windows_1709_docker_multimachine_virtualbox.box
+```
 
 
+Be sure to have the latest updates installed! For me, it only worked after the November 2017 culmulative update package, with [KB4048955](https://support.microsoft.com/en-us/help/4048955/windows-10-update-kb4048955) inside. Otherwise ingress networking mode (`deploy: endpoint_mode: vip`) __DOESN´T WORK!__
+
+To see, if a Docker Swarm service with ingress networking mode is able to run, fire up a test service:
+
+__TODO__: use a service, that doesn´t need the other following steps
+
+```
+docker service create --name weathertest --publish 9099:9099 --endpoint-mode vip 172.16.2.10:5000/weatherbockend
+``` 
+
+There´s another difference to the Standard Windows Server 2016 LTS Docker images: The nanoserver and windowsservercore Images are much smaller! BUT: The nanoserver now misses the Powershell! Well, that´s kind of weird - but it´s kind of like in the Linux world, where you don´t have a bash installed per se, but only sh... But there´s help. Microsoft provides a nanoserver with Powershell on top right on Dockerhub: https://hub.docker.com/r/microsoft/powershell/ To pull the correct nanoserver with Powershell, just use:
+
+```
+docker pull microsoft/powershell:nanoserver
+```
+
+But as we use the latest `nanoserver:1709 image, we also have to use the suitable 1709er image for powershell: `microsoft/powershell:6.0.0-rc-nanoserver-1709` - kind of weird again that its only __rc__ right now, but hey. :)
+
+Now you also have to keep in mind, that you have to use `pwsh` instead of `powershell` to enter the Powershell inside a Container:
+
+```
+docker exec -it ContainerID pwsh
+```
+
+
+
+
+#### Workaround: Docker Swarm publish-port mode
+
+As https://docs.microsoft.com/en-us/virtualization/windowscontainers/manage-containers/swarm-mode#publish-ports-for-service-endpoints states, there´s an alternative to routing mesh: Docker Swarm´s publish-port mode. With a Docker Stack deploy, this looks like the following in the docker-stack.yml:
+
+```
+...
+    deploy:
+      ...
+      endpoint_mode: dnsrr
+```
+
+But together with setting the `endpoint_mode` to DNS round-robin (DNSRR) as [described in the docs](https://docs.docker.com/compose/compose-file/#endpoint_mode), we also need to alter the [exported Ports settings](https://docs.docker.com/compose/compose-file/#ports). We need to set it to `mode: host`, which is only possible with [the long syntax](https://docs.docker.com/compose/compose-file/#long-syntax-2) in the Docker Stack / Compose file format:
+
+```
+    ports:
+      - target: {{ service.port }}
+        published: {{ service.port }}
+        protocol: tcp
+        mode: host
+```
+
+Otherwise the Docker engine will tell us the following error:
+
+```
+Error response from daemon: rpc error: code = 3 desc = EndpointSpec: port published with ingress mode can't be used with dnsrr mode
+```
+
+#### Accessing Services in publish-port mode with Traefik
+
+As [Traefik is a good choice for Docker](https://blog.codecentric.de/en/2017/09/traefik-modern-reverse-proxy/) deployments and it also supports Docker Swarm & Kubernetes, we could give it a shot in our hybrid Docker Swarm Cluster. There´s a good [user guide for Traefik and Swarm around](https://docs.traefik.io/user-guide/swarm-mode/) and we´ll try to deploy Traefik as a Docker Swarm Service first. Therefor we add a traefik Docker Swarm Service to our Stack (or the template docker-stack.j2):
+
+```
+...
+
+  traefik:
+    image: traefik
+    ports:
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: host
+      - target: 8080
+        published: 8080
+        protocol: tcp
+        mode: host
+    tty:
+      true
+    restart:
+      unless-stopped
+    deploy:
+      endpoint_mode: dnsrr
+      replicas: 1
+      placement:
+        constraints: [node.labels.os==linux]
+        constraints: [node.role == manager]
+    command:
+      - --docker
+      - --docker.swarmmode
+      - --docker.domain={{ docker_domain }}
+      - --docker.watch
+      - --web
+      - --logLevel=INFO
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+
+    networks:
+     - {{swarm_network_name }}
+
+networks:
+  {{ swarm_network_name }}:
+```
+
+The last network definition will take care of the networkcreation, which is better then 2 seperate docker-stack.ymls with one for the apps and one for Traefik - because this will lead to an Docker Stack deploy network removal error like this:
+
+```
+fatal: [masterwindows01]: FAILED! => {"changed": true, "cmd": "docker stack rm clearsky", "delta": "0:00:01.006847", "end": "2017-11-13 08:06:56.286584", "failed": true, "msg": "non-zero return code", "rc": 1, "start": "2017-11-13 08:06:55.279736", "stderr": "Removing service clearsky_weatherbackend\nRemoving service clearsky_eureka-serviceregistry\nRemoving service clearsky_weatherservice\nRemoving service clearsky_eureka-serviceregistry-second\nRemoving network clearsky_mixed_swarm_net\nFailed to remove network c9np7umv1vnk7whxthlc7r28u: Error response from daemon: rpc error: code = 9 desc = network c9np7umv1vnk7whxthlc7r28u is in use by service iu5x4d1oh1brpd3p6spxd50kgFailed to remove some resources from stack: clearsky", "stderr_lines": ["Removing service clearsky_weatherbackend", "Removing service clearsky_eureka-serviceregistry", "Removing service clearsky_weatherservice", "Removing service clearsky_eureka-serviceregistry-second", "Removing network clearsky_mixed_swarm_net", "Failed to remove network c9np7umv1vnk7whxthlc7r28u: Error response from daemon: rpc error: code = 9 desc = network c9np7umv1vnk7whxthlc7r28u is in use by service iu5x4d1oh1brpd3p6spxd50kgFailed to remove some resources from stack: clearsky"], "stdout": "", "stdout_lines": []}
+```
+
+
+#### Give your Apps access to Traefik
+
+[Docker Stack deploy for Apps provided by Traefik](https://github.com/containous/traefik/issues/994#issuecomment-269095109)
+
+If you now access http://localhost:48080/, you should see the Traefik dashboard with all the Services deployed:
+
+![first-successful-traefik-service-deployment-incl-registered-apps](https://github.com/jonashackt/ansible-windows-docker-springboot/blob/master/first-successful-traefik-service-deployment-incl-registered-apps.png)
+
+Therefore the [Vagrantfile](https://github.com/jonashackt/ansible-windows-docker-springboot/blob/master/step4-windows-linux-multimachine-vagrant-docker-swarm-setup/Vagrantfile) has some more port forwardings prepared:
+
+```
+        # Forwarding the Guest to Host ports, so that we can access it easily from outside the VM
+        workerlinux.vm.network "forwarded_port", guest: 8080, host: 48081, host_ip: "127.0.0.1", id: "traefik_dashboard"
+        workerlinux.vm.network "forwarded_port", guest: 80, host: 40081, host_ip: "127.0.0.1", id: "traefik"
+```
+
+The Apps are templated over the docker-stack.yml:
+
+```
+{% for service in vars.services %}
+  {{ service.name }}:
+    image: {{registry_host}}/{{ service.name }}
+{% if service.map_to_same_port_on_host is defined %}
+    ports:
+      - target: {{ service.port }}
+        published: {{ service.port }}
+        protocol: tcp
+        mode: host
+{% else %}
+    ports:
+      - target: {{ service.port }}
+        protocol: tcp
+        mode: host
+{% endif %}
+    tty:
+      true
+    restart:
+      unless-stopped
+    deploy:
+      endpoint_mode: dnsrr
+      placement:
+{% if service.deploy_target == 'windows' %}
+        constraints: [node.labels.os==windows]
+{% else %}
+        constraints: [node.labels.os==linux]
+{% endif %}
+      labels:
+        - "traefik.port={{ service.port }}"
+        - "traefik.backend={{ service.name }}"
+# Use Traefik healthcheck        "traefik.backend.healthcheck.path": "/healthcheck",
+        - "traefik.frontend.rule=Host:{{ service.name }}.{{ docker_domain }}"
+    networks:
+     - {{swarm_network_name }}
+```
+
+Note that the `traefik.port=YourAppPort` must be the same port, that your Spring Boot application uses (via `server.port=YourAppPort`) and your Container exposes. Then Traefik will automatically route a Request through to the App over the configured first published Port:
+
+```
+   ports:
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: host
+```
+
+Finally the first curls are working:
+
+```
+curl -H Host:eureka-serviceregistry.sky.test http://localhost:40080 -v
+```
+
+![first-successful-app-call-through-traefik](https://github.com/jonashackt/ansible-windows-docker-springboot/blob/master/first-successful-app-call-through-traefik.png)
 
 
 # Links
 
 #### General comparison of Docker Container Orchestrators
 
-mindshare: https://platform9.com/blog/kubernetes-docker-swarm-compared/
+
 
 marketshare: https://blog.netsil.com/kubernetes-vs-docker-swarm-vs-dc-os-may-2017-orchestrator-shootout-fdc59c28ec16
 
@@ -723,6 +1009,8 @@ Docker Swarm Windows Docs: https://docs.microsoft.com/en-us/virtualization/windo
 
 Windows Server 2016 Overlay Networking Support (Windows & Linux mixed mode): https://blogs.technet.microsoft.com/virtualization/2017/04/18/ws2016-overlay-network-driver/
 
+https://blogs.technet.microsoft.com/virtualization/2017/02/09/overlay-network-driver-with-support-for-docker-swarm-mode-now-available-to-windows-insiders-on-windows-10/
+
 Windows & Linux mixed Video: https://www.youtube.com/watch?v=ZfMV5JmkWCY
 
 https://docs.docker.com/engine/swarm/
@@ -733,10 +1021,19 @@ https://docs.docker.com/engine/swarm/services/
 
 docker service create CLI reference: https://docs.docker.com/engine/reference/commandline/service_create/
 
-
 https://docs.docker.com/engine/swarm/stack-deploy/
 
 https://codefresh.io/blog/deploy-docker-compose-v3-swarm-mode-cluster/
+
+Docker network routing mesh support in Windows Server 2016 1709: https://blog.docker.com/2017/09/docker-windows-server-1709/ & https://blogs.technet.microsoft.com/virtualization/2017/09/26/dockers-ingress-routing-mesh-available-with-windows-server-version-1709/
+
+https://blogs.technet.microsoft.com/windowsserver/2017/10/17/windows-server-version-1709-available-for-download/
+
+https://www.microsoft.com/en-us/software-download/windowsinsiderpreviewserver
+
+Autoscaler for Docker Swarm: https://github.com/gianarb/orbiter
+
+
 
 #### Kubernetes
 
@@ -763,4 +1060,38 @@ http://blog.kubernetes.io/2017/08/kompose-helps-developers-move-docker.html?m=1
 http://blog.kubernetes.io/2017/09/windows-networking-at-parity-with-linux.html
 
 
+#### Spring Application Deployment
+
+Spring Cloud kubernetes https://github.com/spring-cloud-incubator/spring-cloud-kubernetes
+
+Shutdown hooks https://www.gesellix.net/post/zero-downtime-deployment-with-docker-stack-and-spring-boot/
+
+Deployment example with Spring Cloud http://pscode.rs/spring-cloud-with-spring-config-and-eureka-in-high-availability-using-docker-swarm/
+
+Windows JDK Docker images: https://hub.docker.com/_/openjdk/
+
+
+#### Traefik
+
+https://docs.traefik.io/configuration/backends/docker/
+
+https://docs.traefik.io/user-guide/swarm-mode/
+
+Windows without working routing mesh: need publish-port mode (dnsrr) at it´s services, then Traefik has a problem: https://github.com/containous/traefik/issues/833
+
+https://github.com/moby/moby/issues/25016
+
+https://github.com/containous/traefik/issues/913
+
+https://stackoverflow.com/questions/45822412/docker-swarm-windows-worker-with-traefik-returns-gateway-timeout
+
+
+
+
+
+### Zero downtime deployment
+
+https://docs.docker.com/engine/swarm/swarm-tutorial/rolling-update/
+
+https://www.gesellix.net/post/zero-downtime-deployment-with-docker-stack-and-spring-boot/
 
